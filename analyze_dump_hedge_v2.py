@@ -37,7 +37,7 @@ DUMP_WINDOW_SEC = 3          # Window size for dump detection
 MONITOR_WINDOW_SEC = 240     # First 4 minutes of market
 MIN_PRICE = 0.10             # Min price threshold
 Z_SCORE_THRESHOLD = 2.5      # Z-score threshold for noise filter (2.5 = aggressive for crypto)
-NOISE_WINDOW = '3s'          # Rolling window for noise detection
+NOISE_WINDOW = 5             # Rolling window size (count-based, number of records)
 MARKET_PATTERN = 'btc-updown-15m-%'
 
 
@@ -92,19 +92,19 @@ def fetch_all_markets(client) -> list:
     return [row[0] for row in result.result_rows]
 
 
-def filter_noise(df: pd.DataFrame, z_threshold: float = 2.5, window: str = '3s') -> pd.DataFrame:
+def filter_noise(df: pd.DataFrame, z_threshold: float = 2.5, window: int = 5) -> pd.DataFrame:
     """
-    Lọc noise từ raw data bằng Z-Score.
+    Lọc noise từ raw data bằng Z-Score (count-based rolling window).
     
     Logic: 
-    - Tính rolling mean và std trong window
+    - Tính rolling mean và std của N records trước đó
     - Z-score = (current - mean) / std
     - Nếu |z_score| > threshold → SPIKE → remove
     
     Args:
         df: Raw data từ ClickHouse
         z_threshold: Ngưỡng Z-score (default 2.5 cho crypto/prediction market)
-        window: Rolling window size (default '3s' = 3 giây)
+        window: Rolling window size = số records (default 5)
     
     Returns: DataFrame đã loại bỏ noise records
     """
@@ -121,23 +121,14 @@ def filter_noise(df: pd.DataFrame, z_threshold: float = 2.5, window: str = '3s')
             filtered_dfs.append(asset_df)
             continue
         
-        # Convert timestamp và set as index
-        asset_df['ts'] = pd.to_datetime(asset_df['timestamp'])
-        asset_df = asset_df.set_index('ts')
-        
-        # Tính rolling mean và std
-        rolling = asset_df['best_ask'].rolling(window, min_periods=3)
-        asset_df['mean'] = rolling.mean()
-        asset_df['std'] = rolling.std()
-        
-        # Shift để lấy mean/std của window TRƯỚC (không bao gồm current)
-        asset_df['mean_before'] = asset_df['mean'].shift(1)
-        asset_df['std_before'] = asset_df['std'].shift(1)
+        # Tính rolling mean và std của N records trước đó (không bao gồm current)
+        # shift(1) để exclude current record khỏi window
+        rolling = asset_df['best_ask'].shift(1).rolling(window=window, min_periods=3)
+        asset_df['mean_before'] = rolling.mean()
+        asset_df['std_before'] = rolling.std()
         
         # Tính Z-score
         asset_df['z_score'] = (asset_df['best_ask'] - asset_df['mean_before']) / asset_df['std_before']
-        
-        asset_df = asset_df.reset_index()
         
         # Filter: giữ lại records có |z_score| <= threshold
         # (hoặc không có đủ data để tính z_score)
@@ -146,7 +137,7 @@ def filter_noise(df: pd.DataFrame, z_threshold: float = 2.5, window: str = '3s')
                (abs(asset_df['z_score']) <= z_threshold)
         
         # Drop helper columns
-        cols_to_drop = ['ts', 'mean', 'std', 'mean_before', 'std_before', 'z_score']
+        cols_to_drop = ['mean_before', 'std_before', 'z_score']
         filtered_dfs.append(asset_df[mask].drop(columns=cols_to_drop, errors='ignore'))
     
     if not filtered_dfs:
