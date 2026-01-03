@@ -153,7 +153,6 @@ def find_dump_events(df: pd.DataFrame) -> pd.DataFrame:
     Logic:
     1. Với mỗi thời điểm, tính min price trong 3 giây tới
     2. Nếu drop >= 30% → dump candidate
-    3. Check noise: nếu giá 3 giây trước thấp hơn nhiều → noise (pump→dump)
     """
     dump_events = []
     
@@ -198,7 +197,6 @@ def find_dump_events(df: pd.DataFrame) -> pd.DataFrame:
             if drop_pct < DUMP_THRESHOLD_PCT:
                 continue
             
-            # Valid dump event (noise đã được filter trước đó bởi filter_noise)
             dump_events.append({
                 'market_slug': row['market_slug'],
                 'asset_id': asset_id,
@@ -267,6 +265,7 @@ def find_hedge_opportunities(df: pd.DataFrame, dump_events: pd.DataFrame) -> pd.
             'entry_second': dump['entry_second'],
             'drop_pct': dump['drop_pct'],
             'dump_duration_ms': dump['dump_duration_ms'],
+            'price_at_dump_start': dump['price_at_dump_start'],
             'entry_price': entry_price,
             'max_hedge_price': round(max_hedge_price, 2),
             'best_hedge_price': min_other_ask,
