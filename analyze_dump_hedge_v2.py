@@ -34,7 +34,8 @@ CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
 # Strategy params
 DUMP_THRESHOLD_PCT = 30      # Minimum drop % to trigger entry
 DUMP_WINDOW_SEC = 3          # Window size for dump detection
-MONITOR_WINDOW_SEC = 240     # First 4 minutes of market
+MONITOR_WINDOW_SEC = 240     # First 4 minutes - chỉ tìm dump trong khoảng này
+HEDGE_WINDOW_SEC = 360       # 6 minutes - fetch data và tìm hedge trong khoảng này
 MIN_PRICE = 0.10             # Min price threshold
 Z_SCORE_THRESHOLD = 2.5      # Z-score threshold for noise filter (2.5 = aggressive for crypto)
 NOISE_WINDOW = 5             # Rolling window size (count-based, number of records)
@@ -53,7 +54,7 @@ def get_client():
 
 
 def fetch_market_data(client, market_slug: str) -> pd.DataFrame:
-    """Fetch data 4 phút đầu của 1 market."""
+    """Fetch data đến HEDGE_WINDOW_SEC (6 phút) của 1 market."""
     # Extract timestamp từ slug trước để tránh lỗi trong query
     try:
         parts = market_slug.split('-')
@@ -71,7 +72,7 @@ def fetch_market_data(client, market_slug: str) -> pd.DataFrame:
         toUnixTimestamp(timestamp) - {market_start_ts} as seconds_into_market
     FROM polymarket_db.market_orderbooks_analytics
     WHERE market_slug = '{market_slug}'
-        AND toUnixTimestamp(timestamp) - {market_start_ts} BETWEEN 0 AND {MONITOR_WINDOW_SEC}
+        AND toUnixTimestamp(timestamp) - {market_start_ts} BETWEEN 0 AND {HEDGE_WINDOW_SEC}
     ORDER BY timestamp
     """
     result = client.query(query)
@@ -148,11 +149,12 @@ def filter_noise(df: pd.DataFrame, z_threshold: float = 2.5, window: int = 5) ->
 
 def find_dump_events(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Tìm dump events trong data của 1 market.
+    Tìm dump events trong MONITOR_WINDOW_SEC đầu (4 phút).
     
     Logic:
-    1. Với mỗi thời điểm, tính min price trong 3 giây tới
-    2. Nếu drop >= 30% → dump candidate
+    1. Chỉ xét records trong 4 phút đầu để detect dump
+    2. Với mỗi thời điểm, tính min price trong 3 giây tới
+    3. Nếu drop >= 30% → dump candidate
     """
     dump_events = []
     
@@ -169,14 +171,17 @@ def find_dump_events(df: pd.DataFrame) -> pd.DataFrame:
         # Convert timestamp để tính toán
         asset_df['ts'] = pd.to_datetime(asset_df['timestamp'])
         
-        for i, row in asset_df.iterrows():
+        # Chỉ xét dump trong MONITOR_WINDOW_SEC đầu
+        dump_candidates = asset_df[asset_df['seconds_into_market'] <= MONITOR_WINDOW_SEC]
+        
+        for i, row in dump_candidates.iterrows():
             current_ts = row['ts']
             current_price = row['best_ask']
             
             if current_price < MIN_PRICE:
                 continue
             
-            # Tìm min trong 3 giây tới
+            # Tìm min trong 3 giây tới (dùng toàn bộ asset_df để có thể xét qua ranh giới 4 phút)
             future_mask = (asset_df['ts'] >= current_ts) & \
                          (asset_df['ts'] <= current_ts + timedelta(seconds=DUMP_WINDOW_SEC))
             future_data = asset_df[future_mask]
@@ -342,8 +347,9 @@ def run_analysis():
     print("=" * 60)
     print(f"\n⚙️  Config:")
     print(f"  - Dump threshold: ≥{DUMP_THRESHOLD_PCT}% trong {DUMP_WINDOW_SEC}s window")
-    print(f"  - Noise filter: Z-Score > {Z_SCORE_THRESHOLD} (window: {NOISE_WINDOW})")
-    print(f"  - Monitor window: {MONITOR_WINDOW_SEC}s (4 phút)")
+    print(f"  - Noise filter: Z-Score > {Z_SCORE_THRESHOLD} (window: {NOISE_WINDOW} records)")
+    print(f"  - Dump detection: {MONITOR_WINDOW_SEC}s đầu (4 phút)")
+    print(f"  - Hedge search: {HEDGE_WINDOW_SEC}s (6 phút)")
     print(f"  - Market pattern: {MARKET_PATTERN}")
     
     print(f"\n🔗 Connecting to ClickHouse...")
