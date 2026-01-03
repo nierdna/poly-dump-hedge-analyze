@@ -1,12 +1,22 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import random
 
 # Constants
 WIN_THRESHOLD = 0.98  # Giá >= 0.98 là win
 ENTRY_MIN = 0.02
 ENTRY_MAX = 0.97  # Không cần cao hơn vì 0.98 đã là win
 STEP = 0.01
+
+# Latency & Slippage simulation
+ENABLE_LATENCY = True  # Bật/tắt mô phỏng latency
+LATENCY_MIN = 1        # Số price points delay tối thiểu
+LATENCY_MAX = 5        # Số price points delay tối đa
+SLIPPAGE_TOLERANCE = 0.02  # Cho phép giá cao hơn entry tối đa 0.02 vẫn khớp lệnh
+
+# Seed cho reproducibility
+RANDOM_SEED = 42
 
 
 def load_data(csv_file):
@@ -30,31 +40,80 @@ def load_data(csv_file):
     return markets
 
 
-def check_market_result(prices, entry, stoploss):
+def sample_latency():
+    """
+    Lấy mẫu latency từ phân phối uniform [LATENCY_MIN, LATENCY_MAX].
+    
+    Returns:
+        Số price points delay
+    """
+    return random.randint(LATENCY_MIN, LATENCY_MAX)
+
+
+def check_market_result(prices, entry, stoploss, use_latency=None):
     """
     Kiểm tra kết quả của 1 market với entry và stoploss cho trước.
+    
+    Có mô phỏng latency: khi giá chạm entry, đợi một khoảng delay
+    rồi kiểm tra xem giá có còn trong vùng entry + slippage không.
     
     Args:
         prices: List các giá của market (theo thứ tự thời gian)
         entry: Giá entry
         stoploss: Giá stoploss
+        use_latency: Bật/tắt mô phỏng latency (mặc định dùng ENABLE_LATENCY)
     
     Returns:
         True nếu thắng, False nếu thua, None nếu không có giao dịch
     """
-    # Tìm index đầu tiên mà price chạm entry
-    entry_index = None
-    for i, price in enumerate(prices):
-        if price <= entry:  # Mua khi giá <= entry
-            entry_index = i
-            break
+    if use_latency is None:
+        use_latency = ENABLE_LATENCY
     
-    if entry_index is None:
-        # Market không bao giờ chạm entry -> không có giao dịch
+    # Tìm điểm entry với mô phỏng latency
+    actual_entry_index = None
+    actual_entry_price = None
+    
+    i = 0
+    while i < len(prices):
+        price = prices[i]
+        
+        if price <= entry:  # Giá chạm mức entry mong muốn
+            if use_latency:
+                # Mô phỏng latency: đợi một số price points
+                latency = sample_latency()
+                fill_index = i + latency
+                
+                # Kiểm tra xem sau khoảng delay, giá có còn trong vùng chấp nhận được không
+                if fill_index < len(prices):
+                    fill_price = prices[fill_index]
+                    
+                    # Chấp nhận nếu giá <= entry + slippage
+                    if fill_price <= entry + SLIPPAGE_TOLERANCE:
+                        actual_entry_index = fill_index
+                        actual_entry_price = fill_price
+                        break
+                    else:
+                        # Giá đã chạy quá xa, bỏ lỡ cơ hội này
+                        # Tiếp tục tìm cơ hội khác từ fill_index
+                        i = fill_index
+                        continue
+                else:
+                    # Không đủ data sau latency
+                    break
+            else:
+                # Không mô phỏng latency: vào lệnh ngay
+                actual_entry_index = i
+                actual_entry_price = price
+                break
+        
+        i += 1
+    
+    if actual_entry_index is None:
+        # Không có cơ hội entry nào khớp lệnh được
         return None
     
-    # Từ entry_index trở đi, kiểm tra win hay loss
-    for i in range(entry_index, len(prices)):
+    # Từ actual_entry_index trở đi, kiểm tra win hay loss
+    for i in range(actual_entry_index, len(prices)):
         price = prices[i]
         
         if price >= WIN_THRESHOLD:
@@ -169,9 +228,20 @@ def find_optimal_entry_stoploss(markets):
 
 
 def main():
+    # Set random seed cho reproducibility
+    random.seed(RANDOM_SEED)
+    
     # Load data (sử dụng file đã sorted)
     csv_file = "btc-updown-15m-2025-12-31-sorted.csv"
     markets = load_data(csv_file)
+    
+    # In thông tin cấu hình latency
+    print("\n=== Cấu hình Latency & Slippage ===")
+    print(f"Enable Latency: {ENABLE_LATENCY}")
+    if ENABLE_LATENCY:
+        print(f"Latency Range: {LATENCY_MIN} - {LATENCY_MAX} price points")
+        print(f"Slippage Tolerance: {SLIPPAGE_TOLERANCE}")
+        print(f"Random Seed: {RANDOM_SEED}")
     
     # Tìm cặp (entry, stoploss) tối ưu
     print("\n=== Tìm cặp (entry, stoploss) tối ưu ===")
