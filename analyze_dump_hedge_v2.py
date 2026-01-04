@@ -32,7 +32,7 @@ CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
 CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
 
 # Strategy params
-DUMP_THRESHOLD_PCT = 30      # Minimum drop % to trigger entry
+DUMP_THRESHOLD_PCT = 15      # Minimum drop % to trigger entry
 DUMP_WINDOW_SEC = 3          # Window size for dump detection
 MONITOR_WINDOW_SEC = 240     # First 4 minutes - chỉ tìm dump trong khoảng này
 HEDGE_WINDOW_SEC = 360       # 6 minutes - fetch data và tìm hedge trong khoảng này
@@ -401,6 +401,11 @@ def run_analysis():
     print(f"\n🔍 Analyzing hedge opportunities...")
     all_dumps_df = pd.concat(all_dump_events, ignore_index=True)
     all_data_df = pd.concat(all_data, ignore_index=True)
+    
+    # Export cleaned data
+    clean_data_file = "cleaned_orderbook_data.csv"
+    all_data_df.to_csv(clean_data_file, index=False)
+    print(f"  → Exported cleaned data to {clean_data_file} ({len(all_data_df)} rows)")
     
     print(f"  → Found {len(all_dumps_df)} dump events (sau filter noise)")
     
