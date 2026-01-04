@@ -5,10 +5,10 @@ Scheduler cho Grid Search Optimizer
 """
 
 import os
-import subprocess
 import sys
 from datetime import datetime
 import requests
+import pandas as pd
 
 # Load .env
 try:
@@ -17,15 +17,22 @@ try:
 except ImportError:
     pass
 
+# Import grid search functions
+from grid_search_optimizer import (
+    get_client,
+    fetch_all_data,
+    filter_noise,
+    run_grid_search,
+    print_results
+)
+
 # ============== TELEGRAM CONFIG ==============
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============== PATHS ==============
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-GRID_SEARCH_SCRIPT = os.path.join(SCRIPT_DIR, "grid_search_optimizer.py")
 RESULTS_FILE = os.path.join(SCRIPT_DIR, "grid_search_results.csv")
-VENV_PYTHON = os.path.join(SCRIPT_DIR, "venv", "bin", "python")
 
 
 def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
@@ -54,44 +61,50 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
         return False
 
 
-def run_grid_search() -> tuple[bool, str]:
-    """Chạy grid search và trả về (success, output)."""
+def execute_grid_search() -> bool:
+    """Chạy grid search trực tiếp (import functions)."""
     print(f"\n{'='*60}")
     print(f"🚀 Starting Grid Search at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}\n")
     
     try:
-        # Dùng venv python nếu có
-        python_exec = VENV_PYTHON if os.path.exists(VENV_PYTHON) else sys.executable
+        # Connect và fetch data
+        print("🔗 Connecting to ClickHouse...")
+        client = get_client()
         
-        result = subprocess.run(
-            [python_exec, GRID_SEARCH_SCRIPT],
-            capture_output=True,
-            text=True,
-            cwd=SCRIPT_DIR,
-            timeout=3600  # 1 hour timeout
-        )
+        # Fetch all data
+        raw_data = fetch_all_data(client, limit_markets=None)
         
-        output = result.stdout + result.stderr
-        success = result.returncode == 0
+        if raw_data.empty:
+            print("❌ No data fetched!")
+            return False
         
-        if success:
-            print("✅ Grid search completed successfully!")
-        else:
-            print(f"❌ Grid search failed with code {result.returncode}")
+        # Filter noise
+        print(f"\n🧹 Filtering noise...")
+        clean_data = filter_noise(raw_data)
+        print(f"  → {len(clean_data)} rows after noise filter")
         
-        return success, output
+        # Run grid search
+        results = run_grid_search(clean_data)
         
-    except subprocess.TimeoutExpired:
-        return False, "❌ Grid search timed out (>1 hour)"
+        # Print results
+        print_results(results)
+        
+        # Export
+        results.to_csv(RESULTS_FILE, index=False)
+        print(f"\n✅ Exported to {RESULTS_FILE}")
+        
+        return True
+        
     except Exception as e:
-        return False, f"❌ Exception: {str(e)}"
+        print(f"❌ Grid search failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 def parse_results() -> str:
     """Parse kết quả từ CSV và format cho Telegram."""
-    import pandas as pd
-    
     if not os.path.exists(RESULTS_FILE):
         return "❌ Results file not found!"
     
@@ -151,7 +164,7 @@ def main():
         print("   - TELEGRAM_CHAT_ID=your_chat_id")
     
     # Run grid search
-    success, output = run_grid_search()
+    success = execute_grid_search()
     
     # Parse and send results
     if success:
@@ -160,7 +173,7 @@ def main():
         message = f"""<b>❌ GRID SEARCH FAILED</b>
 <i>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>
 
-<pre>{output[-1000:] if len(output) > 1000 else output}</pre>
+Check logs for details.
 """
     
     # Send to Telegram
@@ -173,4 +186,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
