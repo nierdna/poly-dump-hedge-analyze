@@ -41,11 +41,11 @@ MAX_DATA_WINDOW = 600  # Fetch 10 phút data để có đủ cho mọi config
 
 # ============== GRID SEARCH PARAMS ==============
 PARAM_GRID = {
-    'dump_pct': [10, 15, 20, 25, 30],          # Entry khi dump >= x%
-    'dump_window': [2, 3, 5],                   # Trong y giây
-    'monitor_end': [180, 240, 300],             # Monitor dump đến giây thứ z
-    'take_profit': [0.90, 0.95, 0.98],          # Hedge khi total < TP
-    'max_wait': [120, 180, 300, 600],           # Max chờ hedge (giây)
+    'dump_pct': [15, 30],          # Entry khi dump >= x%
+    'dump_window': [3],                   # Trong y giây
+    'monitor_end': [240],             # Monitor dump đến giây thứ z
+    'take_profit': [0.95, 0.98],          # Hedge khi total < TP
+    'max_wait': [120],           # Max chờ hedge (giây)
 }
 
 
