@@ -154,7 +154,7 @@ def filter_noise(df: pd.DataFrame) -> pd.DataFrame:
 
 def run_backtest(df: pd.DataFrame, config: Dict) -> Dict:
     """
-    Chạy backtest với 1 config cụ thể.
+    Chạy backtest với 1 config cụ thể (VECTORIZED VERSION).
     
     Returns: Dict với metrics
     """
@@ -176,34 +176,48 @@ def run_backtest(df: pd.DataFrame, config: Dict) -> Dict:
         for asset_id in assets:
             asset_df = market_df[market_df['asset_id'] == asset_id].copy()
             asset_df = asset_df.sort_values('timestamp').reset_index(drop=True)
-            asset_df['ts'] = pd.to_datetime(asset_df['timestamp'])
             
             other_asset_id = [a for a in assets if a != asset_id][0]
             other_df = market_df[market_df['asset_id'] == other_asset_id].copy()
             other_df = other_df.sort_values('timestamp').reset_index(drop=True)
-            other_df['ts'] = pd.to_datetime(other_df['timestamp'])
+            
+            # Convert to numpy arrays for fast operations
+            ts_arr = pd.to_datetime(asset_df['timestamp']).values.astype('datetime64[ns]')
+            ts_seconds = ts_arr.astype('int64') // 10**9  # Convert to seconds
+            prices = asset_df['best_ask'].values
+            bids = asset_df['best_bid'].values
+            secs_into = asset_df['seconds_into_market'].values
+            
+            other_ts_arr = pd.to_datetime(other_df['timestamp']).values.astype('datetime64[ns]')
+            other_ts_seconds = other_ts_arr.astype('int64') // 10**9
+            other_prices = other_df['best_ask'].values
+            
+            n = len(asset_df)
             
             # Chỉ xét dump trong monitor window
-            candidates = asset_df[asset_df['seconds_into_market'] <= monitor_end]
+            candidate_mask = secs_into <= monitor_end
+            candidate_indices = np.where(candidate_mask)[0]
             
-            for _, row in candidates.iterrows():
-                current_ts = row['ts']
-                current_price = row['best_ask']
+            for i in candidate_indices:
+                current_ts_sec = ts_seconds[i]
+                current_price = prices[i]
                 
                 if current_price < MIN_PRICE:
                     continue
                 
-                # Tìm min trong dump_window giây tới
-                future_mask = (asset_df['ts'] >= current_ts) & \
-                             (asset_df['ts'] <= current_ts + timedelta(seconds=dump_window))
-                future_data = asset_df[future_mask]
+                # Tìm indices trong dump_window (vectorized binary search)
+                end_ts_sec = current_ts_sec + dump_window
+                end_idx = np.searchsorted(ts_seconds, end_ts_sec, side='right')
                 
-                if len(future_data) < 2:
+                if end_idx <= i + 1:
                     continue
                 
-                min_price = future_data['best_ask'].min()
-                min_idx = future_data['best_ask'].idxmin()
-                entry_ts = future_data.loc[min_idx, 'ts']
+                # Lấy min price trong window
+                window_prices = prices[i:end_idx]
+                min_idx_local = np.argmin(window_prices)
+                min_price = window_prices[min_idx_local]
+                entry_idx = i + min_idx_local
+                entry_ts_sec = ts_seconds[entry_idx]
                 
                 if min_price < MIN_PRICE:
                     continue
@@ -215,58 +229,56 @@ def run_backtest(df: pd.DataFrame, config: Dict) -> Dict:
                 
                 entry_price = min_price
                 
-                # Tìm hedge opportunity
-                hedge_candidates = other_df[
-                    (other_df['ts'] >= entry_ts) & 
-                    (other_df['ts'] <= entry_ts + timedelta(seconds=max_wait))
-                ]
+                # Tìm hedge opportunity trong other_df (vectorized)
+                hedge_start_idx = np.searchsorted(other_ts_seconds, entry_ts_sec, side='left')
+                hedge_end_ts_sec = entry_ts_sec + max_wait
+                hedge_end_idx = np.searchsorted(other_ts_seconds, hedge_end_ts_sec, side='right')
+                
+                if hedge_start_idx >= hedge_end_idx or hedge_start_idx >= len(other_prices):
+                    continue
+                
+                hedge_window_prices = other_prices[hedge_start_idx:hedge_end_idx]
+                hedge_window_ts = other_ts_seconds[hedge_start_idx:hedge_end_idx]
                 
                 # Tìm điểm hedge thỏa mãn take_profit
                 max_hedge_price = take_profit - entry_price
+                valid_hedge_mask = hedge_window_prices <= max_hedge_price
                 
-                hedge_found = False
-                for _, h_row in hedge_candidates.iterrows():
-                    if h_row['best_ask'] <= max_hedge_price:
-                        hedge_price = h_row['best_ask']
-                        hedge_ts = h_row['ts']
-                        total_cost = entry_price + hedge_price
-                        profit_pct = (1 - total_cost) * 100
-                        wait_seconds = (hedge_ts - entry_ts).total_seconds()
-                        
-                        trades.append({
-                            'market': market,
-                            'entry_price': entry_price,
-                            'hedge_price': hedge_price,
-                            'total_cost': total_cost,
-                            'profit_pct': profit_pct,
-                            'is_win': True,
-                            'exit_type': 'hedge_tp',
-                            'wait_seconds': wait_seconds
-                        })
-                        hedge_found = True
-                        break
-                
-                if not hedge_found:
-                    # Không hedge được trong take_profit threshold
-                    # So sánh 2 options: hedge ở cuối window vs cut loss
+                if np.any(valid_hedge_mask):
+                    # Tìm điểm đầu tiên thỏa mãn
+                    first_valid_idx = np.argmax(valid_hedge_mask)
+                    hedge_price = hedge_window_prices[first_valid_idx]
+                    hedge_ts_sec = hedge_window_ts[first_valid_idx]
+                    total_cost = entry_price + hedge_price
+                    profit_pct = (1 - total_cost) * 100
+                    wait_seconds = hedge_ts_sec - entry_ts_sec
                     
-                    # Option 1: Hedge ở cuối window (giá cuối cùng, không biết trước)
-                    last_hedge_price = hedge_candidates.iloc[-1]['best_ask']
+                    trades.append({
+                        'market': market,
+                        'entry_price': entry_price,
+                        'hedge_price': hedge_price,
+                        'total_cost': total_cost,
+                        'profit_pct': profit_pct,
+                        'is_win': True,
+                        'exit_type': 'hedge_tp',
+                        'wait_seconds': wait_seconds
+                    })
+                else:
+                    # Không hedge được trong take_profit threshold
+                    # Option 1: Hedge ở cuối window
+                    last_hedge_price = hedge_window_prices[-1]
                     total_cost_hedge = entry_price + last_hedge_price
                     profit_if_hedge = (1 - total_cost_hedge) * 100
                     
-                    # Option 2: Bán asset đã mua (cut loss) - bán ở best_bid cuối window
-                    exit_window = asset_df[
-                        (asset_df['ts'] >= entry_ts) & 
-                        (asset_df['ts'] <= entry_ts + timedelta(seconds=max_wait))
-                    ]
-                    exit_price = exit_window.iloc[-1]['best_bid']
+                    # Option 2: Cut loss - tìm best_bid cuối window của asset đã entry
+                    exit_end_ts_sec = entry_ts_sec + max_wait
+                    exit_end_idx = np.searchsorted(ts_seconds, exit_end_ts_sec, side='right')
+                    exit_end_idx = min(exit_end_idx, n) - 1
+                    exit_price = bids[exit_end_idx]
                     
                     loss_if_exit = (exit_price - entry_price) / entry_price * 100
                     
-                    # Chọn option nào tốt hơn
                     if profit_if_hedge >= loss_if_exit:
-                        # Hedge dù không đạt TP (vẫn tốt hơn cut loss)
                         trades.append({
                             'market': market,
                             'entry_price': entry_price,
@@ -278,7 +290,6 @@ def run_backtest(df: pd.DataFrame, config: Dict) -> Dict:
                             'wait_seconds': max_wait
                         })
                     else:
-                        # Cut loss tốt hơn
                         trades.append({
                             'market': market,
                             'entry_price': entry_price,
