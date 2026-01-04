@@ -434,7 +434,7 @@ def main():
     client = get_client()
     
     # Fetch all data (có thể limit số markets để test nhanh)
-    TEST_MODE = True
+    TEST_MODE = False
     limit_markets = 1 if TEST_MODE else None  # None = all markets
     
     if TEST_MODE:
