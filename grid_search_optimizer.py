@@ -362,10 +362,9 @@ def run_grid_search(df: pd.DataFrame) -> pd.DataFrame:
     for i, combo in enumerate(combinations):
         config = dict(zip(keys, combo))
         
-        if (i + 1) % 20 == 0:
-            elapsed = time.time() - start_time
-            eta = elapsed / (i + 1) * (len(combinations) - i - 1)
-            print(f"  → Progress: {i + 1}/{len(combinations)} ({elapsed:.0f}s elapsed, ETA: {eta:.0f}s)")
+        elapsed = time.time() - start_time
+        eta = elapsed / (i + 1) * (len(combinations) - i - 1) if i > 0 else 0
+        print(f"  → Progress: {i + 1}/{len(combinations)} ({elapsed:.0f}s elapsed, ETA: {eta:.0f}s)")
         
         result = run_backtest(df, config)
         results.append(result)
